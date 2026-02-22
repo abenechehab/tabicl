@@ -1,0 +1,468 @@
+"""Direct Preference Optimization (DPO) fine-tuning of TabICL.
+
+The script fine-tunes a pretrained TabICL checkpoint on a single
+classification dataset using DPO loss instead of cross-entropy.
+A frozen copy of the initial checkpoint serves as the reference model.
+
+Preference pairs (chosen / rejected) are generated on-the-fly from a
+configurable strategy: random wrong class, majority class, hard negative
+mining from the reference model, or confusion-set pairing.
+
+Default dataset: imbalanced 3-class synthetic dataset (sklearn), split
+into train / val / test.
+
+Usage
+-----
+Activate the project venv, then:
+
+    python -m tabicl.finetune.dpo                                     # all defaults
+    python -m tabicl.finetune.dpo --preference-generator majority
+    python -m tabicl.finetune.dpo --preference-generator hard
+    python -m tabicl.finetune.dpo --preference-generator confusion
+    python -m tabicl.finetune.dpo --beta 0.5 --epochs 10 --lr 1e-5
+    python -m tabicl.finetune.dpo --output-dir runs/dpo_hard --save-ckpt
+
+Type-annotated CLI arguments are parsed by tyro; run with --help to see
+the full list of options.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, Optional
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+
+import tyro
+
+from tabicl import TabICL
+from tabicl.finetune.generate_preference_data import (
+    PreferenceGenerator,
+    RandomNegativeGenerator,
+    MajorityNegativeGenerator,
+    HardNegativeMiningGenerator,
+    ConfusionSetGenerator,
+)
+from tabicl.finetune.utils import (
+    set_seed,
+    resolve_device,
+    load_pretrained,
+    apply_freeze,
+    load_and_split,
+    EpisodicDataset,
+    collate_episodes,
+    evaluate,
+)
+
+
+# ---------------------------------------------------------------------------
+# CLI configuration (parsed by tyro)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Config:
+    # --- checkpoint ---------------------------------------------------------
+    checkpoint_version: str = "tabicl-classifier-v2-20260212.ckpt"
+    """HuggingFace filename of the pretrained TabICL checkpoint to start from."""
+
+    checkpoint_path: Optional[str] = None
+    """Local path to a checkpoint file.  If provided, skips HF Hub download."""
+
+    # --- data ---------------------------------------------------------------
+    val_size: float = 0.15
+    """Fraction of the full dataset reserved for validation."""
+
+    test_size: float = 0.15
+    """Fraction of the full dataset reserved for held-out test evaluation."""
+
+    seed: int = 42
+    """Global random seed for reproducibility."""
+
+    # --- training -----------------------------------------------------------
+    epochs: int = 5
+    """Number of full passes over the training episodic batches."""
+
+    batch_size: int = 16
+    """Number of (train-context, test-query) episodes per gradient step.
+    Each episode is built by resampling a random train/test split of the
+    dataset, so the effective dataset is augmented across batches."""
+
+    context_fraction: float = 0.7
+    """Fraction of the episode's samples used as in-context training data;
+    the remaining samples become query (test) points whose DPO loss is
+    optimised."""
+
+    lr: float = 1e-5
+    """AdamW learning rate (keep small to avoid catastrophic forgetting)."""
+
+    weight_decay: float = 0.0
+    """AdamW weight-decay coefficient."""
+
+    gradient_clip: float = 1.0
+    """Max-norm gradient clipping (0 = disabled)."""
+
+    # --- DPO-specific -------------------------------------------------------
+    beta: float = 0.1
+    """DPO temperature: controls how strongly deviations from the reference
+    model are penalised.  Higher values enforce stricter preference alignment."""
+
+    preference_generator: Literal["random", "majority", "hard", "confusion"] = "random"
+    """Strategy for generating rejected (negative) labels.
+
+    - ``random``    : sample a uniformly random incorrect class per query sample
+    - ``majority``  : use the globally most frequent class as the rejected label
+    - ``hard``      : use the highest-probability wrong class from the frozen
+                      reference model (hard negative mining)
+    - ``confusion`` : use the most historically confused class for each true
+                      label (requires a one-time confusion-matrix pass before
+                      training)
+    """
+
+    # --- freezing -----------------------------------------------------------
+    freeze_col: bool = False
+    """Freeze the column-embedding sub-network."""
+
+    freeze_row: bool = False
+    """Freeze the row-interaction sub-network."""
+
+    freeze_icl: bool = False
+    """Freeze the in-context-learning (ICL) sub-network."""
+
+    # --- logging / saving ---------------------------------------------------
+    output_dir: str = "runs/dpo"
+    """Directory for TensorBoard logs and (optionally) the saved checkpoint."""
+
+    log_every: int = 10
+    """Log training metrics to TensorBoard every this many steps."""
+
+    val_every: int = 1
+    """Run validation every this many epochs."""
+
+    save_ckpt: bool = False
+    """Save the fine-tuned model as ``<output_dir>/tabicl_dpo.ckpt`` after training."""
+
+    device: Optional[str] = None
+    """Compute device (e.g. 'cpu', 'cuda', 'cuda:1').  Auto-detected if None."""
+
+
+# ---------------------------------------------------------------------------
+# DPO loss
+# ---------------------------------------------------------------------------
+
+def dpo_loss(
+    logits: torch.Tensor,
+    ref_logits: torch.Tensor,
+    pos_labels: torch.Tensor,
+    neg_labels: torch.Tensor,
+    beta: float = 0.1,
+) -> torch.Tensor:
+    """DPO loss for multiclass classification.
+
+    Parameters
+    ----------
+    logits :     (N, C)  log-unnormalised scores from the trainable model
+    ref_logits : (N, C)  log-unnormalised scores from the frozen reference model
+    pos_labels : (N,)    preferred (true) class indices
+    neg_labels : (N,)    dispreferred (wrong) class indices
+    beta :       scalar temperature (higher = stricter preference alignment)
+    """
+    log_probs     = F.log_softmax(logits, dim=-1)
+    ref_log_probs = F.log_softmax(ref_logits, dim=-1)
+
+    logp_pos     = log_probs.gather(1, pos_labels.unsqueeze(1)).squeeze(1)
+    logp_neg     = log_probs.gather(1, neg_labels.unsqueeze(1)).squeeze(1)
+    ref_logp_pos = ref_log_probs.gather(1, pos_labels.unsqueeze(1)).squeeze(1)
+    ref_logp_neg = ref_log_probs.gather(1, neg_labels.unsqueeze(1)).squeeze(1)
+
+    delta_theta = logp_pos - logp_neg
+    delta_ref   = ref_logp_pos - ref_logp_neg
+
+    return (-F.logsigmoid(beta * (delta_theta - delta_ref))).mean()
+
+
+# ---------------------------------------------------------------------------
+# Preference generator setup
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def _compute_tabicl_confusion_matrix(
+    model: TabICL,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    num_classes: int,
+    device: torch.device,
+) -> np.ndarray:
+    """Estimate a confusion matrix via a single in-context inference pass.
+
+    Uses the first half of training data as context and the second half as
+    queries to compute predictions and build the confusion matrix.
+    """
+    model.eval()
+    n        = len(y_train)
+    ctx_size = n // 2
+
+    X_ctx  = X_train[:ctx_size]
+    y_ctx  = y_train[:ctx_size]
+    X_qry  = X_train[ctx_size:]
+    y_true = y_train[ctx_size:]
+
+    X_ep    = np.concatenate([X_ctx, X_qry], axis=0)
+    X_t     = torch.from_numpy(X_ep).float().unsqueeze(0).to(device)
+    y_ctx_t = torch.from_numpy(y_ctx.astype(np.float32)).unsqueeze(0).to(device)
+
+    logits = model(X=X_t, y_train=y_ctx_t, return_logits=True)
+    preds  = logits.squeeze(0)[:, :num_classes].argmax(dim=-1).cpu().numpy()
+
+    conf = np.zeros((num_classes, num_classes), dtype=int)
+    for true, pred in zip(y_true, preds):
+        conf[true, pred] += 1
+
+    print(f"Confusion matrix for ConfusionSetGenerator:\n{conf}")
+    return conf
+
+
+def build_preference_generator(
+    cfg: Config,
+    y_train: np.ndarray,
+    num_classes: int,
+    ref_model: TabICL,
+    X_train: np.ndarray,
+    device: torch.device,
+) -> PreferenceGenerator:
+    """Instantiate the preference generator specified by ``cfg.preference_generator``."""
+    name = cfg.preference_generator
+    print(f"Preference generator : {name!r}")
+
+    if name == "random":
+        return RandomNegativeGenerator(num_classes=num_classes)
+
+    if name == "majority":
+        return MajorityNegativeGenerator(y_train=torch.from_numpy(y_train))
+
+    if name == "hard":
+        return HardNegativeMiningGenerator()
+
+    if name == "confusion":
+        conf = _compute_tabicl_confusion_matrix(
+            ref_model, X_train, y_train, num_classes, device
+        )
+        return ConfusionSetGenerator(confusion_matrix=conf)
+
+    raise ValueError(f"Unknown preference_generator: {name!r}")
+
+
+# ---------------------------------------------------------------------------
+# Negative-label generation inside the training loop
+# ---------------------------------------------------------------------------
+
+def get_neg_labels(
+    generator: PreferenceGenerator,
+    y_valid: torch.Tensor,
+    ref_logits_valid: torch.Tensor,
+) -> torch.Tensor:
+    """Return rejected (negative) class labels for each valid query sample.
+
+    For ``HardNegativeMiningGenerator`` we bypass the generic ``generate()``
+    API and use the pre-computed (no-grad) reference-model logits directly,
+    since TabICL requires in-context examples that are not available inside
+    the generic call.  All other generators are called through their normal
+    interface with ``model=None``.
+    """
+    if isinstance(generator, HardNegativeMiningGenerator):
+        # Highest-probability wrong class according to the frozen ref model
+        probs = F.softmax(ref_logits_valid.detach(), dim=-1).clone()
+        probs.scatter_(1, y_valid.unsqueeze(1), 0.0)
+        return probs.argmax(dim=1)
+
+    # random, majority, confusion – these generators ignore both X and model
+    _, _, neg_labels = generator.generate(y_valid, y_valid, model=None)
+    return neg_labels
+
+
+# ---------------------------------------------------------------------------
+# Main training routine
+# ---------------------------------------------------------------------------
+
+def train(cfg: Config) -> None:
+    set_seed(cfg.seed)
+    device     = resolve_device(cfg)
+    output_dir = Path(cfg.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Device : {device}")
+    print(f"Output : {output_dir}\n")
+
+    # -- Data ----------------------------------------------------------------
+    X_train, y_train, X_val, y_val, X_test, y_test = load_and_split(cfg)
+    num_classes = int(y_train.max()) + 1
+
+    train_ds = EpisodicDataset(X_train, y_train, cfg.context_fraction, cfg.seed)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        collate_fn=collate_episodes,
+        num_workers=0,
+    )
+
+    # -- Models --------------------------------------------------------------
+    model, model_config = load_pretrained(cfg)
+
+    # Frozen reference model: deep-copy before any device placement
+    ref_model = copy.deepcopy(model)
+    ref_model.eval()
+    for p in ref_model.parameters():
+        p.requires_grad = False
+
+    apply_freeze(model, cfg)
+    model     = model.to(device)
+    ref_model = ref_model.to(device)
+
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_total     = sum(p.numel() for p in model.parameters())
+    print(f"Parameters : {n_trainable:,} trainable / {n_total:,} total\n")
+
+    # -- Preference generator ------------------------------------------------
+    generator = build_preference_generator(
+        cfg, y_train, num_classes, ref_model, X_train, device
+    )
+
+    # -- Optimiser -----------------------------------------------------------
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
+    )
+
+    # -- Logging -------------------------------------------------------------
+    writer = SummaryWriter(log_dir=str(output_dir))
+
+    # -- Training loop -------------------------------------------------------
+    global_step  = 0
+    best_val_acc = -1.0
+
+    for epoch in range(1, cfg.epochs + 1):
+        model.train()
+        epoch_loss = 0.0
+        epoch_acc  = 0.0
+        n_batches  = 0
+
+        for X_batch, y_ctx_batch, y_qry_batch, ctx_sizes in train_loader:
+            X_batch     = X_batch.to(device)       # (B, T, H)
+            y_ctx_batch = y_ctx_batch.to(device)   # (B, ctx_max) – float
+            y_qry_batch = y_qry_batch.to(device)   # (B, qry_max) – int64
+
+            ctx_size = ctx_sizes[0]
+
+            optimizer.zero_grad(set_to_none=True)
+
+            # -- Reference model forward (no gradient) -----------------------
+            with torch.no_grad():
+                ref_logits = ref_model(
+                    X=X_batch,
+                    y_train=y_ctx_batch[:, :ctx_size],
+                    return_logits=True,
+                )  # (B, qry_size, max_classes)
+                ref_logits = ref_logits[:, :, :num_classes]  # (B, Q, C)
+
+            # -- Trainable model forward (gradient flows here) ---------------
+            logits = model(
+                X=X_batch,
+                y_train=y_ctx_batch[:, :ctx_size],
+            )  # (B, qry_size, max_classes)
+            logits = logits[:, :, :num_classes]  # (B, Q, C)
+
+            # -- Flatten and remove padding (-100) ---------------------------
+            B, Q, C = logits.shape
+            logits_flat     = logits.reshape(B * Q, C)
+            ref_logits_flat = ref_logits.reshape(B * Q, C)
+            y_flat          = y_qry_batch.reshape(B * Q)
+
+            valid_mask       = y_flat != -100
+            logits_valid     = logits_flat[valid_mask]       # (N, C)
+            ref_logits_valid = ref_logits_flat[valid_mask]   # (N, C)
+            pos_labels       = y_flat[valid_mask]            # (N,)
+
+            # -- Generate rejected labels ------------------------------------
+            neg_labels = get_neg_labels(generator, pos_labels, ref_logits_valid)
+
+            # -- DPO loss ----------------------------------------------------
+            loss = dpo_loss(logits_valid, ref_logits_valid, pos_labels, neg_labels, beta=cfg.beta)
+            loss.backward()
+
+            if cfg.gradient_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.gradient_clip)
+
+            optimizer.step()
+
+            # -- Accuracy (greedy argmax on trainable model) -----------------
+            with torch.no_grad():
+                preds = logits_valid.argmax(dim=-1)
+                acc   = (preds == pos_labels).float().mean().item()
+
+            epoch_loss += loss.item()
+            epoch_acc  += acc
+            n_batches  += 1
+            global_step += 1
+
+            if global_step % cfg.log_every == 0:
+                writer.add_scalar("train/dpo_loss", loss.item(), global_step)
+                writer.add_scalar("train/accuracy",  acc,         global_step)
+                writer.add_scalar(
+                    "train/lr",
+                    optimizer.param_groups[0]["lr"],
+                    global_step,
+                )
+
+        avg_loss = epoch_loss / max(n_batches, 1)
+        avg_acc  = epoch_acc  / max(n_batches, 1)
+        print(
+            f"Epoch {epoch:3d}/{cfg.epochs} — "
+            f"train dpo_loss: {avg_loss:.4f}, train acc: {avg_acc:.4f}",
+            end="",
+        )
+
+        # -- Validation -------------------------------------------------------
+        if epoch % cfg.val_every == 0:
+            val_loss, val_acc = evaluate(
+                model, X_train, y_train, X_val, y_val, device
+            )
+            writer.add_scalar("val/loss",     val_loss, epoch)
+            writer.add_scalar("val/accuracy", val_acc,  epoch)
+            print(f"  |  val loss: {val_loss:.4f}, val acc: {val_acc:.4f}", end="")
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+
+        print()  # newline after epoch line
+
+    writer.close()
+    print(f"\nBest validation accuracy: {best_val_acc:.4f}")
+
+    # -- Test evaluation ------------------------------------------------------
+    model.eval()
+    test_loss, test_acc = evaluate(
+        model, X_train, y_train, X_test, y_test, device
+    )
+    print(f"Test accuracy : {test_acc:.4f}  (loss: {test_loss:.4f})")
+
+    # -- Save checkpoint ------------------------------------------------------
+    if cfg.save_ckpt:
+        save_path = output_dir / "tabicl_dpo.ckpt"
+        torch.save({"config": model_config, "state_dict": model.state_dict()}, save_path)
+        print(f"\nFine-tuned checkpoint saved to: {save_path}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    cfg = tyro.cli(Config)
+    train(cfg)
