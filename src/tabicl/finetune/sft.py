@@ -39,6 +39,7 @@ from tabicl.finetune.utils import (
     load_pretrained,
     apply_freeze,
     load_and_split,
+    load_from_disk,
     EpisodicDataset,
     collate_episodes,
     evaluate,
@@ -59,6 +60,11 @@ class Config:
     """Local path to a checkpoint file.  If provided, skips HF Hub download."""
 
     # --- data ---------------------------------------------------------------
+    dataset_path: Optional[str] = None
+    """Path to a pre-generated dataset (.npz) saved by make_data.py.
+    If provided, the dataset is loaded from disk and the data-generation
+    parameters below (n_samples, n_classes, …) are ignored."""
+
     val_size: float = 0.15
     """Fraction of the full dataset reserved for validation."""
 
@@ -150,7 +156,11 @@ def train(cfg: Config) -> None:
     print(f"Output : {output_dir}\n")
 
     # -- Data ----------------------------------------------------------------
-    X_train, y_train, X_val, y_val, X_test, y_test = load_and_split(cfg)
+    if cfg.dataset_path is not None:
+        print(f"Loading dataset from disk: {cfg.dataset_path}")
+        X_train, y_train, X_val, y_val, X_test, y_test = load_from_disk(cfg.dataset_path)
+    else:
+        X_train, y_train, X_val, y_val, X_test, y_test = load_and_split(cfg)
 
     train_ds = EpisodicDataset(X_train, y_train, cfg.context_fraction, cfg.seed)
     train_loader = DataLoader(

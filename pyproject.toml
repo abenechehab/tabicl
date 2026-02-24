@@ -46,6 +46,9 @@ pretrain = [
     "joblib",  # parallelize dataset generation
     "pandas",  # used in tests / eval
 ]
+finetune = [
+    "neuralk==0.1.1",
+]
 
 [build-system]
 requires = ["hatchling>=1.26.1"]  # https://github.com/pypa/hatch/issues/1818

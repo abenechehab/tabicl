@@ -103,6 +103,16 @@ def apply_freeze(model: TabICL, cfg) -> None:
 # Dataset helpers
 # ---------------------------------------------------------------------------
 
+def load_from_disk(path: str) -> tuple[np.ndarray, ...]:
+    """Load a dataset saved by ``make_data.py`` and return train/val/test splits."""
+    data = np.load(path)
+    return (
+        data["X_train"], data["y_train"],
+        data["X_val"],   data["y_val"],
+        data["X_test"],  data["y_test"],
+    )
+
+
 def load_and_split(cfg) -> tuple[np.ndarray, ...]:
     """Generate an imbalanced synthetic dataset and return train/val/test splits.
 
