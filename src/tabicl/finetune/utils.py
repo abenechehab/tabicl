@@ -104,12 +104,12 @@ def load_and_split(cfg) -> tuple[np.ndarray, ...]:
     Uses ``cfg.val_size``, ``cfg.test_size``, and ``cfg.seed``.
     """
     X, y = make_classification(
-        n_samples=1000,
-        n_classes=3,
-        n_features=20,
-        n_informative=4,
-        weights=[0.01, 0.01, 0.98],
-        random_state=0,
+        n_samples=cfg.n_samples,
+        n_classes=cfg.n_classes,
+        n_features=cfg.n_features,
+        n_informative=cfg.n_informative,
+        weights=cfg.weights,
+        random_state=cfg.dataset_random_state,
     )
 
     # First split: carve out test set
@@ -134,7 +134,7 @@ def load_and_split(cfg) -> tuple[np.ndarray, ...]:
 
     print(
         f"Dataset splits — train: {len(y_train)}, val: {len(y_val)}, test: {len(y_test)}\n"
-        f"Classes: {le.classes_}  (imbalanced: weights=[0.01, 0.01, 0.98])"
+        f"Classes: {le.classes_}  weights={cfg.weights}"
     )
     return X_train, y_train, X_val, y_val, X_test, y_test
 
