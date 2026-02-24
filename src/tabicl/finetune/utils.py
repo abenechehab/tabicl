@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import TensorDataset
 
 from sklearn.datasets import make_classification
 from sklearn.metrics import (
@@ -130,13 +129,13 @@ def load_and_split(cfg) -> tuple[np.ndarray, ...]:
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train).astype(np.float32)
-    X_val   = scaler.transform(X_val).astype(np.float32)
-    X_test  = scaler.transform(X_test).astype(np.float32)
+    X_val = scaler.transform(X_val).astype(np.float32)
+    X_test = scaler.transform(X_test).astype(np.float32)
 
     le = LabelEncoder()
     y_train = le.fit_transform(y_train).astype(np.int64)
-    y_val   = le.transform(y_val).astype(np.int64)
-    y_test  = le.transform(y_test).astype(np.int64)
+    y_val = le.transform(y_val).astype(np.int64)
+    y_test = le.transform(y_test).astype(np.int64)
 
     print(
         f"Dataset splits — train: {len(y_train)}, val: {len(y_val)}, test: {len(y_test)}\n"
@@ -194,7 +193,7 @@ class EpisodicDataset(TensorDataset):
         X_qry = self.X[qry_idx]
         y_qry = self.y[qry_idx]
 
-        X_ep     = torch.cat([X_ctx, X_qry], dim=0)   # (T, H)
+        X_ep = torch.cat([X_ctx, X_qry], dim=0)   # (T, H)
         y_ctx_ep = y_ctx.float()                        # (ctx_size,)
         y_qry_ep = y_qry                                # (qry_size,) int64
 
@@ -213,13 +212,13 @@ def collate_episodes(batch):
     """
     X_list, y_ctx_list, y_qry_list, ctx_sizes = zip(*batch)
 
-    T_max   = max(x.shape[0] for x in X_list)
+    T_max = max(x.shape[0] for x in X_list)
     ctx_max = max(y.shape[0] for y in y_ctx_list)
     qry_max = max(y.shape[0] for y in y_qry_list)
     H = X_list[0].shape[1]
     B = len(X_list)
 
-    X_batch     = torch.zeros(B, T_max, H)
+    X_batch = torch.zeros(B, T_max, H)
     y_ctx_batch = torch.zeros(B, ctx_max)
     y_qry_batch = torch.full((B, qry_max), fill_value=-100, dtype=torch.int64)
 
@@ -252,20 +251,20 @@ def evaluate(
     """
     model.eval()
 
-    X_ep    = np.concatenate([X_ctx, X_qry], axis=0)
-    X_t     = torch.from_numpy(X_ep).float().unsqueeze(0).to(device)
+    X_ep = np.concatenate([X_ctx, X_qry], axis=0)
+    X_t = torch.from_numpy(X_ep).float().unsqueeze(0).to(device)
     y_ctx_t = torch.from_numpy(y_ctx.astype(np.float32)).unsqueeze(0).to(device)
 
     logits = model(X=X_t, y_train=y_ctx_t, return_logits=True)
     logits = logits.squeeze(0)  # (qry_size, num_classes)
 
     y_true = torch.from_numpy(y_qry.astype(np.int64)).to(device)
-    loss   = F.cross_entropy(logits, y_true).item()
+    loss = F.cross_entropy(logits, y_true).item()
 
-    preds     = logits.argmax(dim=-1).cpu().numpy()
-    acc       = accuracy_score(y_qry, preds)
+    preds = logits.argmax(dim=-1).cpu().numpy()
+    acc = accuracy_score(y_qry, preds)
     precision = precision_score(y_qry, preds, average="macro", zero_division=0)
-    recall    = recall_score(y_qry, preds, average="macro", zero_division=0)
-    f1        = f1_score(y_qry, preds, average="macro", zero_division=0)
+    recall = recall_score(y_qry, preds, average="macro", zero_division=0)
+    f1 = f1_score(y_qry, preds, average="macro", zero_division=0)
     print("Classification report:\n", classification_report(y_qry, preds, zero_division=0))
     return loss, acc, precision, recall, f1

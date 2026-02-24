@@ -33,9 +33,7 @@ from torch.utils.tensorboard import SummaryWriter
 import tyro
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-from tabicl import TabICL
 from tabicl.finetune.utils import (
-    REPO_ID,
     set_seed,
     resolve_device,
     load_pretrained,
@@ -169,7 +167,7 @@ def train(cfg: Config) -> None:
     model = model.to(device)
 
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    n_total     = sum(p.numel() for p in model.parameters())
+    n_total = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {n_trainable:,} trainable / {n_total:,} total\n")
 
     # -- Optimiser -----------------------------------------------------------
@@ -188,15 +186,15 @@ def train(cfg: Config) -> None:
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
-        epoch_loss      = 0.0
-        epoch_acc       = 0.0
+        epoch_loss = 0.0
+        epoch_acc = 0.0
         epoch_precision = 0.0
-        epoch_recall    = 0.0
-        epoch_f1        = 0.0
-        n_batches       = 0
+        epoch_recall = 0.0
+        epoch_f1 = 0.0
+        n_batches = 0
 
         for X_batch, y_ctx_batch, y_qry_batch, ctx_sizes in train_loader:
-            X_batch     = X_batch.to(device)      # (B, T, H)
+            X_batch = X_batch.to(device)      # (B, T, H)
             y_ctx_batch = y_ctx_batch.to(device)  # (B, ctx_max) – float
             y_qry_batch = y_qry_batch.to(device)  # (B, qry_max) – int64
 
@@ -232,40 +230,40 @@ def train(cfg: Config) -> None:
 
             # Metrics (ignoring padding)
             with torch.no_grad():
-                mask      = y_qry_batch.reshape(B * Q) != -100
-                preds     = logits_qry.reshape(B * Q, C).argmax(dim=-1)
+                mask = y_qry_batch.reshape(B * Q) != -100
+                preds = logits_qry.reshape(B * Q, C).argmax(dim=-1)
                 y_true_np = y_qry_batch.reshape(B * Q)[mask].cpu().numpy()
-                preds_np  = preds[mask].cpu().numpy()
-                acc       = (preds[mask] == y_qry_batch.reshape(B * Q)[mask]).float().mean().item()
+                preds_np = preds[mask].cpu().numpy()
+                acc = accuracy_score(y_true_np, preds_np)
                 precision = precision_score(y_true_np, preds_np, average="macro", zero_division=0)
-                recall    = recall_score(y_true_np, preds_np, average="macro", zero_division=0)
-                f1        = f1_score(y_true_np, preds_np, average="macro", zero_division=0)
+                recall = recall_score(y_true_np, preds_np, average="macro", zero_division=0)
+                f1 = f1_score(y_true_np, preds_np, average="macro", zero_division=0)
 
-            epoch_loss      += loss.item()
-            epoch_acc       += acc
+            epoch_loss += loss.item()
+            epoch_acc += acc
             epoch_precision += precision
-            epoch_recall    += recall
-            epoch_f1        += f1
-            n_batches       += 1
-            global_step     += 1
+            epoch_recall += recall
+            epoch_f1 += f1
+            n_batches += 1
+            global_step += 1
 
             if global_step % cfg.log_every == 0:
-                writer.add_scalar("train/loss",      loss.item(), global_step)
-                writer.add_scalar("train/accuracy",  acc,         global_step)
-                writer.add_scalar("train/precision", precision,   global_step)
-                writer.add_scalar("train/recall",    recall,      global_step)
-                writer.add_scalar("train/f1",        f1,          global_step)
+                writer.add_scalar("train/loss", loss.item(), global_step)
+                writer.add_scalar("train/accuracy", acc, global_step)
+                writer.add_scalar("train/precision", precision, global_step)
+                writer.add_scalar("train/recall", recall, global_step)
+                writer.add_scalar("train/f1", f1, global_step)
                 writer.add_scalar(
                     "train/lr",
                     optimizer.param_groups[0]["lr"],
                     global_step,
                 )
 
-        avg_loss      = epoch_loss      / max(n_batches, 1)
-        avg_acc       = epoch_acc       / max(n_batches, 1)
+        avg_loss = epoch_loss / max(n_batches, 1)
+        avg_acc = epoch_acc / max(n_batches, 1)
         avg_precision = epoch_precision / max(n_batches, 1)
-        avg_recall    = epoch_recall    / max(n_batches, 1)
-        avg_f1        = epoch_f1        / max(n_batches, 1)
+        avg_recall = epoch_recall  / max(n_batches, 1)
+        avg_f1 = epoch_f1 / max(n_batches, 1)
         print(
             f"Epoch {epoch:3d}/{cfg.epochs} — "
             f"train loss: {avg_loss:.4f}, acc: {avg_acc:.4f}, "
@@ -279,11 +277,11 @@ def train(cfg: Config) -> None:
             val_loss, val_acc, val_precision, val_recall, val_f1 = evaluate(
                 model, X_train, y_train, X_val, y_val, device
             )
-            writer.add_scalar("val/loss",      val_loss,      epoch)
-            writer.add_scalar("val/accuracy",  val_acc,       epoch)
+            writer.add_scalar("val/loss", val_loss, epoch)
+            writer.add_scalar("val/accuracy", val_acc, epoch)
             writer.add_scalar("val/precision", val_precision, epoch)
-            writer.add_scalar("val/recall",    val_recall,    epoch)
-            writer.add_scalar("val/f1",        val_f1,        epoch)
+            writer.add_scalar("val/recall", val_recall, epoch)
+            writer.add_scalar("val/f1", val_f1, epoch)
             print(
                 f"  |  val loss: {val_loss:.4f}, acc: {val_acc:.4f}, "
                 f"prec: {val_precision:.4f}, rec: {val_recall:.4f}, f1: {val_f1:.4f}",

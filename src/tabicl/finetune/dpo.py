@@ -40,7 +40,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 import tyro
-from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from tabicl import TabICL
 from tabicl.finetune.generate_preference_data import (
@@ -191,16 +191,16 @@ def dpo_loss(
     neg_labels : (N,)    dispreferred (wrong) class indices
     beta :       scalar temperature (higher = stricter preference alignment)
     """
-    log_probs     = F.log_softmax(logits, dim=-1)
+    log_probs = F.log_softmax(logits, dim=-1)
     ref_log_probs = F.log_softmax(ref_logits, dim=-1)
 
-    logp_pos     = log_probs.gather(1, pos_labels.unsqueeze(1)).squeeze(1)
-    logp_neg     = log_probs.gather(1, neg_labels.unsqueeze(1)).squeeze(1)
+    logp_pos = log_probs.gather(1, pos_labels.unsqueeze(1)).squeeze(1)
+    logp_neg = log_probs.gather(1, neg_labels.unsqueeze(1)).squeeze(1)
     ref_logp_pos = ref_log_probs.gather(1, pos_labels.unsqueeze(1)).squeeze(1)
     ref_logp_neg = ref_log_probs.gather(1, neg_labels.unsqueeze(1)).squeeze(1)
 
     delta_theta = logp_pos - logp_neg
-    delta_ref   = ref_logp_pos - ref_logp_neg
+    delta_ref = ref_logp_pos - ref_logp_neg
 
     return (-F.logsigmoid(beta * (delta_theta - delta_ref))).mean()
 
@@ -223,20 +223,20 @@ def _compute_tabicl_confusion_matrix(
     queries to compute predictions and build the confusion matrix.
     """
     model.eval()
-    n        = len(y_train)
+    n = len(y_train)
     ctx_size = n // 2
 
-    X_ctx  = X_train[:ctx_size]
-    y_ctx  = y_train[:ctx_size]
-    X_qry  = X_train[ctx_size:]
+    X_ctx = X_train[:ctx_size]
+    y_ctx = y_train[:ctx_size]
+    X_qry = X_train[ctx_size:]
     y_true = y_train[ctx_size:]
 
-    X_ep    = np.concatenate([X_ctx, X_qry], axis=0)
-    X_t     = torch.from_numpy(X_ep).float().unsqueeze(0).to(device)
+    X_ep = np.concatenate([X_ctx, X_qry], axis=0)
+    X_t = torch.from_numpy(X_ep).float().unsqueeze(0).to(device)
     y_ctx_t = torch.from_numpy(y_ctx.astype(np.float32)).unsqueeze(0).to(device)
 
     logits = model(X=X_t, y_train=y_ctx_t, return_logits=True)
-    preds  = logits.squeeze(0)[:, :num_classes].argmax(dim=-1).cpu().numpy()
+    preds = logits.squeeze(0)[:, :num_classes].argmax(dim=-1).cpu().numpy()
 
     conf = np.zeros((num_classes, num_classes), dtype=int)
     for true, pred in zip(y_true, preds):
@@ -310,7 +310,7 @@ def get_neg_labels(
 
 def train(cfg: Config) -> None:
     set_seed(cfg.seed)
-    device     = resolve_device(cfg)
+    device = resolve_device(cfg)
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -340,11 +340,11 @@ def train(cfg: Config) -> None:
         p.requires_grad = False
 
     apply_freeze(model, cfg)
-    model     = model.to(device)
+    model = model.to(device)
     ref_model = ref_model.to(device)
 
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    n_total     = sum(p.numel() for p in model.parameters())
+    n_total = sum(p.numel() for p in model.parameters())
     print(f"Parameters : {n_trainable:,} trainable / {n_total:,} total\n")
 
     # -- Preference generator ------------------------------------------------
@@ -368,15 +368,15 @@ def train(cfg: Config) -> None:
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
-        epoch_loss      = 0.0
-        epoch_acc       = 0.0
+        epoch_loss = 0.0
+        epoch_acc = 0.0
         epoch_precision = 0.0
-        epoch_recall    = 0.0
-        epoch_f1        = 0.0
-        n_batches       = 0
+        epoch_recall = 0.0
+        epoch_f1 = 0.0
+        n_batches = 0
 
         for X_batch, y_ctx_batch, y_qry_batch, ctx_sizes in train_loader:
-            X_batch     = X_batch.to(device)       # (B, T, H)
+            X_batch = X_batch.to(device)       # (B, T, H)
             y_ctx_batch = y_ctx_batch.to(device)   # (B, ctx_max) – float
             y_qry_batch = y_qry_batch.to(device)   # (B, qry_max) – int64
 
@@ -402,14 +402,14 @@ def train(cfg: Config) -> None:
 
             # -- Flatten and remove padding (-100) ---------------------------
             B, Q, C = logits.shape
-            logits_flat     = logits.reshape(B * Q, C)
+            logits_flat = logits.reshape(B * Q, C)
             ref_logits_flat = ref_logits.reshape(B * Q, C)
-            y_flat          = y_qry_batch.reshape(B * Q)
+            y_flat = y_qry_batch.reshape(B * Q)
 
-            valid_mask       = y_flat != -100
-            logits_valid     = logits_flat[valid_mask]       # (N, C)
+            valid_mask = y_flat != -100
+            logits_valid = logits_flat[valid_mask]       # (N, C)
             ref_logits_valid = ref_logits_flat[valid_mask]   # (N, C)
-            pos_labels       = y_flat[valid_mask]            # (N,)
+            pos_labels = y_flat[valid_mask]            # (N,)
 
             # -- Generate rejected labels ------------------------------------
             neg_labels = get_neg_labels(generator, pos_labels, ref_logits_valid)
@@ -425,39 +425,39 @@ def train(cfg: Config) -> None:
 
             # -- Metrics (greedy argmax on trainable model) ------------------
             with torch.no_grad():
-                preds     = logits_valid.argmax(dim=-1)
+                preds = logits_valid.argmax(dim=-1)
                 y_true_np = pos_labels.cpu().numpy()
-                preds_np  = preds.cpu().numpy()
-                acc       = (preds == pos_labels).float().mean().item()
+                preds_np = preds.cpu().numpy()
+                acc = accuracy_score(y_true_np, preds_np)
                 precision = precision_score(y_true_np, preds_np, average="macro", zero_division=0)
-                recall    = recall_score(y_true_np, preds_np, average="macro", zero_division=0)
-                f1        = f1_score(y_true_np, preds_np, average="macro", zero_division=0)
+                recall = recall_score(y_true_np, preds_np, average="macro", zero_division=0)
+                f1 = f1_score(y_true_np, preds_np, average="macro", zero_division=0)
 
-            epoch_loss      += loss.item()
-            epoch_acc       += acc
+            epoch_loss += loss.item()
+            epoch_acc += acc
             epoch_precision += precision
-            epoch_recall    += recall
-            epoch_f1        += f1
-            n_batches       += 1
-            global_step     += 1
+            epoch_recall += recall
+            epoch_f1 += f1
+            n_batches += 1
+            global_step += 1
 
             if global_step % cfg.log_every == 0:
                 writer.add_scalar("train/dpo_loss", loss.item(), global_step)
-                writer.add_scalar("train/accuracy",  acc,         global_step)
-                writer.add_scalar("train/precision", precision,   global_step)
-                writer.add_scalar("train/recall",    recall,      global_step)
-                writer.add_scalar("train/f1",        f1,          global_step)
+                writer.add_scalar("train/accuracy", acc, global_step)
+                writer.add_scalar("train/precision", precision, global_step)
+                writer.add_scalar("train/recall", recall, global_step)
+                writer.add_scalar("train/f1", f1, global_step)
                 writer.add_scalar(
                     "train/lr",
                     optimizer.param_groups[0]["lr"],
                     global_step,
                 )
 
-        avg_loss      = epoch_loss      / max(n_batches, 1)
-        avg_acc       = epoch_acc       / max(n_batches, 1)
+        avg_loss = epoch_loss / max(n_batches, 1)
+        avg_acc = epoch_acc / max(n_batches, 1)
         avg_precision = epoch_precision / max(n_batches, 1)
-        avg_recall    = epoch_recall    / max(n_batches, 1)
-        avg_f1        = epoch_f1        / max(n_batches, 1)
+        avg_recall = epoch_recall / max(n_batches, 1)
+        avg_f1 = epoch_f1 / max(n_batches, 1)
         print(
             f"Epoch {epoch:3d}/{cfg.epochs} — "
             f"train dpo_loss: {avg_loss:.4f}, acc: {avg_acc:.4f}, "
@@ -470,11 +470,11 @@ def train(cfg: Config) -> None:
             val_loss, val_acc, val_precision, val_recall, val_f1 = evaluate(
                 model, X_train, y_train, X_val, y_val, device
             )
-            writer.add_scalar("val/loss",      val_loss,      epoch)
-            writer.add_scalar("val/accuracy",  val_acc,       epoch)
+            writer.add_scalar("val/loss", val_loss, epoch)
+            writer.add_scalar("val/accuracy", val_acc, epoch)
             writer.add_scalar("val/precision", val_precision, epoch)
-            writer.add_scalar("val/recall",    val_recall,    epoch)
-            writer.add_scalar("val/f1",        val_f1,        epoch)
+            writer.add_scalar("val/recall", val_recall, epoch)
+            writer.add_scalar("val/f1", val_f1, epoch)
             print(
                 f"  |  val loss: {val_loss:.4f}, acc: {val_acc:.4f}, "
                 f"prec: {val_precision:.4f}, rec: {val_recall:.4f}, f1: {val_f1:.4f}",
