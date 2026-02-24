@@ -12,7 +12,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from sklearn.datasets import make_classification
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
@@ -237,11 +243,12 @@ def evaluate(
     X_qry: np.ndarray,
     y_qry: np.ndarray,
     device: torch.device,
-) -> tuple[float, float]:
-    """Run one evaluation episode and return ``(cross-entropy, accuracy)``.
+) -> tuple[float, float, float, float, float]:
+    """Run one evaluation episode and return ``(loss, accuracy, precision, recall, f1)``.
 
     Uses all of ``X_ctx``/``y_ctx`` as the in-context set and evaluates
-    predictions on ``X_qry``/``y_qry``.
+    predictions on ``X_qry``/``y_qry``.  Precision, recall, and F1 are
+    macro-averaged across classes.
     """
     model.eval()
 
@@ -255,7 +262,10 @@ def evaluate(
     y_true = torch.from_numpy(y_qry.astype(np.int64)).to(device)
     loss   = F.cross_entropy(logits, y_true).item()
 
-    preds = logits.argmax(dim=-1).cpu().numpy()
-    acc   = accuracy_score(y_qry, preds)
-    print("Classification report:\n", classification_report(y_qry, preds))
-    return loss, acc
+    preds     = logits.argmax(dim=-1).cpu().numpy()
+    acc       = accuracy_score(y_qry, preds)
+    precision = precision_score(y_qry, preds, average="macro", zero_division=0)
+    recall    = recall_score(y_qry, preds, average="macro", zero_division=0)
+    f1        = f1_score(y_qry, preds, average="macro", zero_division=0)
+    print("Classification report:\n", classification_report(y_qry, preds, zero_division=0))
+    return loss, acc, precision, recall, f1

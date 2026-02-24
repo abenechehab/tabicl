@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 import tyro
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from tabicl import TabICL
 from tabicl.finetune.utils import (
@@ -188,9 +188,12 @@ def train(cfg: Config) -> None:
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
-        epoch_loss = 0.0
-        epoch_acc  = 0.0
-        n_batches  = 0
+        epoch_loss      = 0.0
+        epoch_acc       = 0.0
+        epoch_precision = 0.0
+        epoch_recall    = 0.0
+        epoch_f1        = 0.0
+        n_batches       = 0
 
         for X_batch, y_ctx_batch, y_qry_batch, ctx_sizes in train_loader:
             X_batch     = X_batch.to(device)      # (B, T, H)
@@ -227,43 +230,65 @@ def train(cfg: Config) -> None:
 
             optimizer.step()
 
-            # Accuracy (ignoring padding)
+            # Metrics (ignoring padding)
             with torch.no_grad():
-                mask = y_qry_batch.reshape(B * Q) != -100
-                preds = logits_qry.reshape(B * Q, C).argmax(dim=-1)
-                acc = (preds[mask] == y_qry_batch.reshape(B * Q)[mask]).float().mean().item()
+                mask      = y_qry_batch.reshape(B * Q) != -100
+                preds     = logits_qry.reshape(B * Q, C).argmax(dim=-1)
+                y_true_np = y_qry_batch.reshape(B * Q)[mask].cpu().numpy()
+                preds_np  = preds[mask].cpu().numpy()
+                acc       = (preds[mask] == y_qry_batch.reshape(B * Q)[mask]).float().mean().item()
+                precision = precision_score(y_true_np, preds_np, average="macro", zero_division=0)
+                recall    = recall_score(y_true_np, preds_np, average="macro", zero_division=0)
+                f1        = f1_score(y_true_np, preds_np, average="macro", zero_division=0)
 
-            epoch_loss += loss.item()
-            epoch_acc  += acc
-            n_batches  += 1
-            global_step += 1
+            epoch_loss      += loss.item()
+            epoch_acc       += acc
+            epoch_precision += precision
+            epoch_recall    += recall
+            epoch_f1        += f1
+            n_batches       += 1
+            global_step     += 1
 
             if global_step % cfg.log_every == 0:
-                writer.add_scalar("train/loss", loss.item(), global_step)
-                writer.add_scalar("train/accuracy", acc, global_step)
+                writer.add_scalar("train/loss",      loss.item(), global_step)
+                writer.add_scalar("train/accuracy",  acc,         global_step)
+                writer.add_scalar("train/precision", precision,   global_step)
+                writer.add_scalar("train/recall",    recall,      global_step)
+                writer.add_scalar("train/f1",        f1,          global_step)
                 writer.add_scalar(
                     "train/lr",
                     optimizer.param_groups[0]["lr"],
                     global_step,
                 )
 
-        avg_loss = epoch_loss / max(n_batches, 1)
-        avg_acc  = epoch_acc  / max(n_batches, 1)
+        avg_loss      = epoch_loss      / max(n_batches, 1)
+        avg_acc       = epoch_acc       / max(n_batches, 1)
+        avg_precision = epoch_precision / max(n_batches, 1)
+        avg_recall    = epoch_recall    / max(n_batches, 1)
+        avg_f1        = epoch_f1        / max(n_batches, 1)
         print(
             f"Epoch {epoch:3d}/{cfg.epochs} — "
-            f"train loss: {avg_loss:.4f}, train acc: {avg_acc:.4f}",
+            f"train loss: {avg_loss:.4f}, acc: {avg_acc:.4f}, "
+            f"prec: {avg_precision:.4f}, rec: {avg_recall:.4f}, f1: {avg_f1:.4f}",
             end="",
         )
 
         # -- Validation ------------------------------------------------------
         if epoch % cfg.val_every == 0:
             # Use all training data as context, validate on val set
-            val_loss, val_acc = evaluate(
+            val_loss, val_acc, val_precision, val_recall, val_f1 = evaluate(
                 model, X_train, y_train, X_val, y_val, device
             )
-            writer.add_scalar("val/loss",     val_loss, epoch)
-            writer.add_scalar("val/accuracy", val_acc,  epoch)
-            print(f"  |  val loss: {val_loss:.4f}, val acc: {val_acc:.4f}", end="")
+            writer.add_scalar("val/loss",      val_loss,      epoch)
+            writer.add_scalar("val/accuracy",  val_acc,       epoch)
+            writer.add_scalar("val/precision", val_precision, epoch)
+            writer.add_scalar("val/recall",    val_recall,    epoch)
+            writer.add_scalar("val/f1",        val_f1,        epoch)
+            print(
+                f"  |  val loss: {val_loss:.4f}, acc: {val_acc:.4f}, "
+                f"prec: {val_precision:.4f}, rec: {val_recall:.4f}, f1: {val_f1:.4f}",
+                end="",
+            )
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
@@ -275,10 +300,13 @@ def train(cfg: Config) -> None:
 
     # -- Test evaluation -----------------------------------------------------
     model.eval()
-    test_loss, test_acc = evaluate(
+    test_loss, test_acc, test_precision, test_recall, test_f1 = evaluate(
         model, X_train, y_train, X_test, y_test, device
     )
-    print(f"Test accuracy : {test_acc:.4f}  (loss: {test_loss:.4f})")
+    print(
+        f"Test — loss: {test_loss:.4f}, acc: {test_acc:.4f}, "
+        f"prec: {test_precision:.4f}, rec: {test_recall:.4f}, f1: {test_f1:.4f}"
+    )
 
     # -- Save checkpoint -----------------------------------------------------
     if cfg.save_ckpt:
