@@ -10,7 +10,7 @@ authors = [
     { name = "Gaël Varoquaux" } ,
 ]
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 keywords = ["tabular data", "foundation model", "TabICL", "in-context learning"]
 classifiers = [
     "Intended Audience :: Science/Research",
@@ -19,8 +19,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python",
     'Programming Language :: Python :: 3',
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -34,8 +32,6 @@ dependencies = [
     "psutil", # used for memory calculation at inference
     "tqdm>=4.64.0",
     "huggingface-hub",
-    "tyro>=1.0.6",
-    "tensorboard>=2.20.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +44,10 @@ pretrain = [
 ]
 finetune = [
     "neuralk==0.1.1",
+    "tyro>=1.0.6",
+    "tensorboard>=2.20.0",
+    "pexpect>=4.9.0",
+    "matplotlib>=3.10.8",
 ]
 
 [build-system]
