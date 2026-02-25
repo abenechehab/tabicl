@@ -6,7 +6,7 @@ triplets for DPO-style training in classification problems.
 """
 
 from abc import ABC, abstractmethod
-from typing import Tuple, List
+from typing import Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F

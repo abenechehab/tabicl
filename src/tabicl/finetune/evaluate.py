@@ -108,7 +108,7 @@ def main() -> None:
     # LabelEncoder ensures labels are 0-indexed contiguous integers
     le = LabelEncoder()
     y_train_enc = le.fit_transform(y_train).astype(np.float32)
-    y_test_enc = le.transform(y_test)
+    # y_test_enc = le.transform(y_test)
 
     # ------------------------------------------------------------------
     # 3. Build tensors for the PyTorch interface
